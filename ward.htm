@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>MI112 病房 — 目前住院病人列表</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    table { border-collapse: collapse; width: 100%; margin-bottom: 20px; }
+    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+    tr:hover { background-color: #f1f1f1; cursor: pointer; }
+    .hidden { display: none; }
+    .form-group { margin-bottom: 10px; }
+  </style>
+</head>
+<body>
+
+  <h1>MI112 病房 — 目前住院病人</h1>
+  <table id="patientTable">
+    <thead>
+      <tr><th>病人姓名 / ID</th><th>Encounter ID</th></tr>
+    </thead>
+    <tbody>
+      <!-- 病人清單將被填入 -->
+    </tbody>
+  </table>
+
+  <div id="hrFormDiv" class="hidden">
+    <h2>記錄心率 — <span id="selPatientName"></span></h2>
+    <div class="form-group">
+      <label for="hrInput">心率 (bpm): </label>
+      <input type="number" id="hrInput" min="1" required>
+    </div>
+    <div class="form-group">
+      <label for="timeInput">測量時間 (ISO 8601): </label>
+      <input type="datetime-local" id="timeInput">
+    </div>
+    <button id="submitHr">送出 Observation</button>
+    <button id="cancelHr">取消</button>
+    <div id="resultMsg"></div>
+  </div>
+
+  <script>
+   // const fhirBase = 'https://hapi.fhir.org/baseR4';
+const fhirBase = 'http://203.64.84.177:8080/fhir';
+    let currentPatient = null;  // 當前選取病人
+    let currentEncounter = null;
+
+    async function fetchEncounters() {
+      const url = fhirBase + '/Encounter?status=in-progress&location=Location/f4c8a5f1-947a-4aea-9e53-3ac64739c4f2&_include=Encounter:subject';
+      const resp = await fetch(url, { headers: { 'Accept': 'application/fhir+json' }});
+      if (!resp.ok) {
+        console.error('Fetch failed', resp.status, resp.statusText);
+        return;
+      }
+      const bundle = await resp.json();
+      populateTable(bundle);
+    }
+
+    function populateTable(bundle) {
+      const tableBody = document.getElementById('patientTable').querySelector('tbody');
+      tableBody.innerHTML = '';
+      const entries = bundle.entry || [];
+      // Build map from Patient id to Patient resource
+      const patients = {};
+      entries.forEach(e => {
+        if (e.resource.resourceType === 'Patient') {
+          patients[e.resource.id] = e.resource;
+        }
+      });
+      entries.forEach(e => {
+        if (e.resource.resourceType === 'Encounter') {
+          const enc = e.resource;
+          const patRef = enc.subject && enc.subject.reference;
+          let patName = '(unknown)';
+          if (patRef) {
+            const pid = patRef.replace('Patient/', '');
+            const pat = patients[pid];
+            if (pat && pat.name && pat.name.length > 0) {
+              patName = pat.name[0].text || (pat.name[0].given + ' ' + pat.name[0].family);
+            }
+          }
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td>${patName} (${patRef || ''})</td><td>${enc.id}</td>`;
+          tr.addEventListener('click', () => {
+            onPatientSelect(patName, patRef, enc);
+          });
+          tableBody.appendChild(tr);
+        }
+      });
+    }
+
+    function onPatientSelect(name, patRef, encounter) {
+      currentPatient = patRef;
+      currentEncounter = encounter;
+      document.getElementById('selPatientName').textContent = name;
+      document.getElementById('hrFormDiv').classList.remove('hidden');
+      document.getElementById('resultMsg').textContent = '';
+      document.getElementById('hrInput').value = '';
+      document.getElementById('timeInput').value = '';
+    }
+
+    document.getElementById('cancelHr').addEventListener('click', () => {
+      document.getElementById('hrFormDiv').classList.add('hidden');
+    });
+
+    document.getElementById('submitHr').addEventListener('click', async () => {
+      const hr = document.getElementById('hrInput').value;
+      const time = document.getElementById('timeInput').value;
+      if (!hr) {
+        alert('請輸入心率值');
+        return;
+      }
+      const obs = buildHeartRateObservation(currentPatient, hr, time);
+      const resp = await fetch(fhirBase + '/Observation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/fhir+json' },
+        body: JSON.stringify(obs)
+      });
+      if (resp.ok) {
+        document.getElementById('resultMsg').textContent = '心率已送出 ✔️';
+      } else {
+        document.getElementById('resultMsg').textContent = '送出失敗：' + resp.status + ' ' + resp.statusText;
+      }
+    });
+
+    function buildHeartRateObservation(patRef, hrValue, dateTime) {
+      const now = dateTime ? new Date(dateTime).toISOString() : new Date().toISOString();
+      return {
+        resourceType: "Observation",
+        status: "final",
+        category: [
+          {
+            coding: [
+              { system: "http://terminology.hl7.org/CodeSystem/observation-category", code: "vital-signs", display: "Vital Signs" }
+            ]
+          }
+        ],
+        code: {
+          coding: [
+            { system: "http://loinc.org", code: "8867-4", display: "Heart rate" }
+          ],
+          text: "Heart rate"
+        },
+        subject: {
+          reference: patRef
+        },
+        effectiveDateTime: now,
+        issued: now,
+        valueQuantity: {
+          value: Number(hrValue),
+          unit: "beats/minute",
+          system: "http://unitsofmeasure.org",
+          code: "/min"
+        }
+      };
+    }
+
+    // 初始化
+    fetchEncounters();
+  </script>
+
+</body>
+</html>

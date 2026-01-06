@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>住院病人問題管理 (FHIR)</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; background: #f9f9f9; }
+    h1, h2 { color: #005b99; }
+    .container { max-width: 900px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.1); }
+    ul { list-style-type: none; padding: 0; }
+    li { padding: 10px; margin: 5px 0; background: #f0f7ff; border-left: 4px solid #007bff; cursor: pointer; }
+    li:hover { background: #e1eeff; }
+    .active { background: #d1e7ff; border-left-color: #0056b3; }
+    .form-group { margin: 15px 0; }
+    input, button { padding: 8px 12px; font-size: 16px; }
+    input { width: 70%; margin-right: 10px; }
+    .conditions { margin-top: 20px; }
+    .condition-item { padding: 8px; background: #f8f9fa; margin: 5px 0; border-radius: 4px; }
+    .error { color: red; }
+    .success { color: green; }
+    .back-btn { margin-bottom: 15px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🏥 住院病人問題管理系統</h1>
+    <div id="view"></div>
+  </div>
+
+  <script>
+    const FHIR_BASE = 'https://hapi.fhir.org/baseR4';
+    const LOCATION_ID = 'f4c8a5f1-947a-4aea-9e53-3ac64739c4f2';
+
+    // 主畫面：列出進行中住院的病人
+    async function showPatientList() {
+      const view = document.getElementById('view');
+      view.innerHTML = '<p>載入中...</p>';
+
+      try {
+        const response = await fetch(`${FHIR_BASE}/Encounter?status=in-progress&location=Location/${LOCATION_ID}`);
+        const bundle = await response.json();
+
+        if (!bundle.entry || bundle.entry.length === 0) {
+          view.innerHTML = '<p>目前無住院病人。</p>';
+          return;
+        }
+
+        // 從 Encounter 提取所有 unique Patient reference
+        const patientRefs = new Set();
+        bundle.entry.forEach(entry => {
+          const encounter = entry.resource;
+          if (encounter.subject && encounter.subject.reference) {
+            patientRefs.add(encounter.subject.reference);
+          }
+        });
+
+        const patientList = [];
+        for (const ref of patientRefs) {
+          // ref 格式如 "Patient/12345"
+          const patientId = ref.split('/')[1];
+          const patientRes = await fetch(`${FHIR_BASE}/Patient/${patientId}`);
+          if (patientRes.ok) {
+            const patient = await patientRes.json();
+            patientList.push(patient);
+          }
+        }
+
+        let html = '<h2>現有住院病人</h2><ul>';
+        patientList.forEach(p => {
+          const name = p.name?.[0]?.text ||
+                      (p.name?.[0]?.given?.join(' ') + ' ' + (p.name?.[0]?.family || '')).trim() ||
+                      '未命名';
+          html += `<li onclick="showPatientDetail('${p.id}', '${name}')">${name}</li>`;
+        });
+        html += '</ul>';
+        view.innerHTML = html;
+      } catch (err) {
+        view.innerHTML = `<p class="error">載入失敗：${err.message}</p>`;
+      }
+    }
+
+    // 顯示單一病人問題
+    async function showPatientDetail(patientId, patientName) {
+      const view = document.getElementById('view');
+      view.innerHTML = `<div class="back-btn"><button onclick="showPatientList()">⬅ 回病房列表</button></div>
+                        <h2>病人：${patientName}</h2>
+                        <div class="conditions" id="conditionsList">載入問題中...</div>
+                        <div class="form-group">
+                          <input type="text" id="newCondition" placeholder="輸入新問題（例如：高血壓、肺炎）" />
+                          <button onclick="addCondition('${patientId}')">新增問題</button>
+                        </div>
+                        <div id="msg"></div>`;
+
+      try {
+        const res = await fetch(`${FHIR_BASE}/Condition?patient=Patient/${patientId}&_sort=-recordedDate`);
+        const bundle = await res.json();
+        const conditions = bundle.entry ? bundle.entry.map(e => e.resource) : [];
+
+        const listEl = document.getElementById('conditionsList');
+        if (conditions.length === 0) {
+          listEl.innerHTML = '<p>目前無記錄問題。</p>';
+        } else {
+          let html = '<h3>現有問題：</h3>';
+          conditions.forEach(cond => {
+            const status = cond.clinicalStatus?.coding?.[0]?.code || 'unknown';
+            const display = cond.code?.text || cond.code?.coding?.[0]?.display || '未知診斷';
+            const recorded = cond.recordedDate ? new Date(cond.recordedDate).toLocaleString('zh-TW') : '';
+            html += `<div class="condition-item">
+                      📌 ${display} 
+                      <span style="color: ${status === 'active' ? 'green' : 'gray'}">(${status})</span>
+                      ${recorded ? `<br><small>記錄時間：${recorded}</small>` : ''}
+                    </div>`;
+          });
+          listEl.innerHTML = html;
+        }
+      } catch (err) {
+        document.getElementById('conditionsList').innerHTML = `<p class="error">載入問題失敗：${err.message}</p>`;
+      }
+    }
+
+    // 新增 Condition
+    async function addCondition(patientId) {
+      const input = document.getElementById('newCondition');
+      const msgEl = document.getElementById('msg');
+      const text = input.value.trim();
+      if (!text) {
+        msgEl.innerHTML = '<p class="error">請輸入問題描述</p>';
+        return;
+      }
+
+      const newCondition = {
+        resourceType: "Condition",
+        clinicalStatus: {
+          coding: [{
+            system: "http://terminology.hl7.org/CodeSystem/condition-clinical",
+            code: "active",
+            display: "Active"
+          }]
+        },
+        verificationStatus: {
+          coding: [{
+            system: "http://terminology.hl7.org/CodeSystem/condition-ver-status",
+            code: "confirmed",
+            display: "Confirmed"
+          }]
+        },
+        code: {
+          text: text
+        },
+        subject: {
+          reference: `Patient/${patientId}`
+        },
+        recordedDate: new Date().toISOString()
+      };
+
+      try {
+        msgEl.innerHTML = '<p>新增中...</p>';
+        const res = await fetch(`${FHIR_BASE}/Condition`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/fhir+json' },
+          body: JSON.stringify(newCondition)
+        });
+
+        if (res.ok) {
+          msgEl.innerHTML = '<p class="success">✅ 問題新增成功！</p>';
+          input.value = '';
+          // 重新載入病人頁面（簡化：直接重整）
+          const patientName = document.querySelector('h2').textContent.replace('病人：', '');
+          showPatientDetail(patientId, patientName);
+        } else {
+          const errText = await res.text();
+          msgEl.innerHTML = `<p class="error">❌ 新增失敗：${res.status} ${errText}</p>`;
+        }
+      } catch (err) {
+        msgEl.innerHTML = `<p class="error">❌ 網路錯誤：${err.message}</p>`;
+      }
+    }
+
+    // 全域暴露函式給 onclick 使用
+    window.showPatientList = showPatientList;
+    window.showPatientDetail = showPatientDetail;
+    window.addCondition = addCondition;
+
+    // 啟動
+    showPatientList();
+  </script>
+</body>
+</html>
